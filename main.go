@@ -92,9 +92,9 @@ func (g *generator) walk(n parse.Node) error {
 		g.Import("fmt")
 		g.out.WriteString(fmt.Sprintf(`	// line %d, offset %d
 	fmt.Print("%s")
-`, node.Line, node.Offset, node.Text()))
+`, node.Line, node.Offset, node.Data))
 	case *parse.PrintNode:
-		v, err := g.walkExpr(node.Expr())
+		v, err := g.walkExpr(node.X)
 		if err != nil {
 			return err
 		}
@@ -110,7 +110,7 @@ func (g *generator) walk(n parse.Node) error {
 func (g *generator) walkExpr(e parse.Expr) (string, error) {
 	switch expr := e.(type) {
 	case *parse.NameExpr:
-		return expr.Name(), nil
+		return expr.Name, nil
 	}
 	return "", nil
 }
