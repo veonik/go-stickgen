@@ -1,36 +1,22 @@
-package main
+package stickgen
 
 import (
-	"github.com/tyler-sommer/stick/parse"
 	"fmt"
-	"os"
 	"bytes"
 	"strings"
-	"github.com/tyler-sommer/stick"
 	"io/ioutil"
 	"errors"
 	"regexp"
+
+	"github.com/tyler-sommer/stick"
+	"github.com/tyler-sommer/stick/parse"
 )
 
-var underscorize = regexp.MustCompile(`[^\w_]`)
-
-func main() {
-	loader := &stick.MemoryLoader{
-		Templates: map[string]string{
-			"layout.twig": `Hello, {% block name %}{% endblock %}!`,
-			"test.twig": `{% extends 'layout.twig' %}{% block name %}World{% endblock %}`,
-		},
-	}
-
-	g := newGenerator(loader)
-	g.parse("test.twig")
-
-	fmt.Println(g.Output())
-}
+var notWordOrUnderscore = regexp.MustCompile(`[^\w_]`)
 
 type renderer func()
 
-type generator struct {
+type Generator struct {
 	loader stick.Loader
 	out *bytes.Buffer
 	name string
@@ -40,50 +26,30 @@ type generator struct {
 	child bool
 }
 
-func (g *generator) parse(name string) {
+func (g *Generator) Generate(name string) (string, error) {
 	tpl, err := g.loader.Load(name)
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return "", err
 	}
 
 	body, err := ioutil.ReadAll(tpl.Contents())
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return "", err
 	}
 	tree, err := parse.Parse(string(body))
 	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		return "", err
 	}
 	if g.name == "" {
-		g.name = string(underscorize.ReplaceAll([]byte(name), []byte("_")))
+		g.name = string(notWordOrUnderscore.ReplaceAll([]byte(name), []byte("_")))
 	}
 	g.walk(tree.Root())
+	return g.output(), nil
 }
 
-func (g *generator) Import(name string) {
-	if _, ok := g.imports[name]; !ok {
-		g.imports[name] = true
-	}
-}
-
-func (g *generator) Arg(name, typ string) {
-	exists := false
-	for _, v := range g.args {
-		if v.Name == name {
-			exists = true
-			break
-		}
-	}
-	if !exists {
-		g.args = append(g.args, struct{ Name, Typ string }{name, typ})
-	}
-}
-
-func newGenerator(loader stick.Loader) *generator {
-	g := &generator{
+// NewGenerator creates a new code generator using the given Loader.
+func NewGenerator(loader stick.Loader) *Generator {
+	g := &Generator{
 		loader: loader,
 		name: "",
 		out: &bytes.Buffer{},
@@ -95,7 +61,7 @@ func newGenerator(loader stick.Loader) *generator {
 	return g
 }
 
-func (g *generator) Output() string {
+func (g *Generator) output() string {
 	args := make([]string, len(g.args))
 	for _, v := range g.args {
 		args = append(args, fmt.Sprintf("%s %s", v.Name, v.Typ))
@@ -127,12 +93,31 @@ func template_%s(%s) {
 `, strings.Join(imports, "\n	"), strings.Join(funcs, "\n"), g.name, strings.Join(args, ", "), body)
 }
 
-func (g *generator) walk(n parse.Node) error {
+func (g *Generator) addImport(name string) {
+	if _, ok := g.imports[name]; !ok {
+		g.imports[name] = true
+	}
+}
+
+func (g *Generator) addArg(name, typ string) {
+	exists := false
+	for _, v := range g.args {
+		if v.Name == name {
+			exists = true
+			break
+		}
+	}
+	if !exists {
+		g.args = append(g.args, struct{ Name, Typ string }{name, typ})
+	}
+}
+
+func (g *Generator) walk(n parse.Node) error {
 	switch node := n.(type) {
 	case *parse.ModuleNode:
 		if node.Parent != nil {
 			if name, ok := g.evaluate(node.Parent.Tpl); ok {
-				g.parse(name)
+				g.Generate(name)
 				g.child = true
 			} else {
 				// TODO: Handle more than just string literals
@@ -148,7 +133,7 @@ func (g *generator) walk(n parse.Node) error {
 			}
 		}
 	case *parse.TextNode:
-		g.Import("fmt")
+		g.addImport("fmt")
 		g.out.WriteString(fmt.Sprintf(`	// line %d, offset %d
 	fmt.Print(%s)
 `, node.Line, node.Offset, fmt.Sprintf("`%s`", node.Data)))
@@ -157,14 +142,14 @@ func (g *generator) walk(n parse.Node) error {
 		if err != nil {
 			return err
 		}
-		g.Import("fmt")
-		g.Arg(v, "string")
+		g.addImport("fmt")
+		g.addArg(v, "string")
 		g.out.WriteString(fmt.Sprintf(`	// line %d, offset %d
 	fmt.Print(%s)
 `, node.Line, node.Offset, v))
 	case *parse.BlockNode:
-		g.Import("fmt")
-		g.blocks[node.Name] = func(g *generator, node *parse.BlockNode) renderer {
+		g.addImport("fmt")
+		g.blocks[node.Name] = func(g *Generator, node *parse.BlockNode) renderer {
 			// TODO: Wow, I don't know about all this.
 			return func() {
 				g.out.WriteString(fmt.Sprintf(`func block_%s() {
@@ -182,7 +167,7 @@ func (g *generator) walk(n parse.Node) error {
 	return nil
 }
 
-func (g *generator) evaluate(e parse.Expr) (string, bool) {
+func (g *Generator) evaluate(e parse.Expr) (string, bool) {
 	switch expr := e.(type) {
 	case *parse.StringExpr:
 		return expr.Text, true
@@ -190,7 +175,7 @@ func (g *generator) evaluate(e parse.Expr) (string, bool) {
 	return "", false
 }
 
-func (g *generator) walkExpr(e parse.Expr) (string, error) {
+func (g *Generator) walkExpr(e parse.Expr) (string, error) {
 	switch expr := e.(type) {
 	case *parse.NameExpr:
 		return expr.Name, nil
