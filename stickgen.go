@@ -1,12 +1,12 @@
 package stickgen
 
 import (
-	"fmt"
 	"bytes"
-	"strings"
-	"io/ioutil"
 	"errors"
+	"fmt"
+	"io/ioutil"
 	"regexp"
+	"strings"
 
 	"github.com/tyler-sommer/stick"
 	"github.com/tyler-sommer/stick/parse"
@@ -16,49 +16,59 @@ var notWordOrUnderscore = regexp.MustCompile(`[^\w_]`)
 
 type renderer func()
 
+// A Generator handles generating Go code from Twig templates.
 type Generator struct {
-	loader stick.Loader
-	out *bytes.Buffer
-	name string
+	loader  stick.Loader
+	out     *bytes.Buffer
+	name    string
 	imports map[string]bool
-	blocks map[string]renderer
-	args []struct{ Name, Typ string }
-	child bool
+	blocks  map[string]renderer
+	args    []struct{ Name, Typ string }
+	child   bool
 }
 
+// Generate parses the given template and outputs the generated code.
 func (g *Generator) Generate(name string) (string, error) {
-	tpl, err := g.loader.Load(name)
+	err := g.generate(name)
 	if err != nil {
 		return "", err
 	}
-
-	body, err := ioutil.ReadAll(tpl.Contents())
-	if err != nil {
-		return "", err
-	}
-	tree, err := parse.Parse(string(body))
-	if err != nil {
-		return "", err
-	}
-	if g.name == "" {
-		g.name = string(notWordOrUnderscore.ReplaceAll([]byte(name), []byte("_")))
-	}
-	g.walk(tree.Root())
 	return g.output(), nil
 }
 
 // NewGenerator creates a new code generator using the given Loader.
 func NewGenerator(loader stick.Loader) *Generator {
 	g := &Generator{
-		loader: loader,
-		name: "",
-		out: &bytes.Buffer{},
+		loader:  loader,
+		name:    "",
+		out:     &bytes.Buffer{},
 		imports: make(map[string]bool),
-		blocks: make(map[string]renderer),
-		args: make([]struct{ Name, Typ string }, 0),
+		blocks:  make(map[string]renderer),
+		args:    make([]struct{ Name, Typ string }, 0),
 	}
 
 	return g
+}
+
+func (g *Generator) generate(name string) error {
+	tpl, err := g.loader.Load(name)
+	if err != nil {
+		return err
+	}
+
+	body, err := ioutil.ReadAll(tpl.Contents())
+	if err != nil {
+		return err
+	}
+	tree, err := parse.Parse(string(body))
+	if err != nil {
+		return err
+	}
+	if g.name == "" {
+		g.name = string(notWordOrUnderscore.ReplaceAll([]byte(name), []byte("_")))
+	}
+	g.walk(tree.Root())
+	return nil
 }
 
 func (g *Generator) output() string {
@@ -77,7 +87,6 @@ func (g *Generator) output() string {
 		block()
 		funcs = append(funcs, g.out.String())
 	}
-
 
 	return fmt.Sprintf(`
 package main
@@ -117,7 +126,10 @@ func (g *Generator) walk(n parse.Node) error {
 	case *parse.ModuleNode:
 		if node.Parent != nil {
 			if name, ok := g.evaluate(node.Parent.Tpl); ok {
-				g.Generate(name)
+				err := g.generate(name)
+				if err != nil {
+					return err
+				}
 				g.child = true
 			} else {
 				// TODO: Handle more than just string literals
