@@ -6,27 +6,61 @@ import (
 	"os"
 	"bytes"
 	"strings"
+	"github.com/tyler-sommer/stick"
+	"io/ioutil"
+	"errors"
+	"regexp"
 )
 
-func main() {
-	tpl := `Hello, {{ name }}!`
+var underscorize = regexp.MustCompile(`[^\w_]`)
 
-	tree, err := parse.Parse(tpl)
+func main() {
+	loader := &stick.MemoryLoader{
+		Templates: map[string]string{
+			"test.twig": `{% extends 'someother.twig' %}{% block test %}World{% endblock %}`,
+			"someother.twig": `Hello, {% block test %}{% endblock %}!`,
+		},
+	}
+
+	g := newGenerator(loader)
+	g.parse("test.twig")
+
+	fmt.Println(g.Output())
+}
+
+type renderer func()
+
+type generator struct {
+	loader stick.Loader
+	out *bytes.Buffer
+	name string
+	imports map[string]bool
+	blocks map[string]renderer
+	args []struct{ Name, Typ string }
+	child bool
+}
+
+func (g *generator) parse(name string) {
+	tpl, err := g.loader.Load(name)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
 
-	g := newGenerator()
+	body, err := ioutil.ReadAll(tpl.Contents())
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	tree, err := parse.Parse(string(body))
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if g.name == "" {
+		g.name = string(underscorize.ReplaceAll([]byte(name), []byte("_")))
+	}
 	g.walk(tree.Root())
-
-	fmt.Println(g.Output())
-}
-
-type generator struct {
-	out *bytes.Buffer
-	imports map[string]bool
-	args []struct{ Name, Typ string }
 }
 
 func (g *generator) Import(name string) {
@@ -48,8 +82,15 @@ func (g *generator) Arg(name, typ string) {
 	}
 }
 
-func newGenerator() *generator {
-	g := &generator{&bytes.Buffer{}, make(map[string]bool), make([]struct{ Name, Typ string }, 0)}
+func newGenerator(loader stick.Loader) *generator {
+	g := &generator{
+		loader: loader,
+		name: "",
+		out: &bytes.Buffer{},
+		imports: make(map[string]bool),
+		blocks: make(map[string]renderer),
+		args: make([]struct{ Name, Typ string }, 0),
+	}
 
 	return g
 }
@@ -63,6 +104,12 @@ func (g *generator) Output() string {
 	for v, _ := range g.imports {
 		imports = append(imports, fmt.Sprintf(`"%s"`, v))
 	}
+	body := g.out.String()
+	g.out.Reset()
+	for _, block := range g.blocks {
+		block()
+	}
+	funcs := g.out.String()
 
 	return fmt.Sprintf(`
 package main
@@ -71,15 +118,25 @@ import (
 	%s
 )
 
-func template(%s) {
 %s
-}
-`, strings.Join(imports, "\n	"), strings.Join(args, ", "), g.out.String())
+
+func template_%s(%s) {
+%s}
+`, strings.Join(imports, "\n	"), funcs, g.name, strings.Join(args, ", "), body)
 }
 
 func (g *generator) walk(n parse.Node) error {
 	switch node := n.(type) {
 	case *parse.ModuleNode:
+		if node.Parent != nil {
+			if name, ok := g.evaluate(node.Parent.Tpl); ok {
+				g.parse(name)
+				g.child = true
+			} else {
+				// TODO: Handle more than just string literals
+				return errors.New("Unable to evaluate extends reference")
+			}
+		}
 		return g.walk(node.BodyNode)
 	case *parse.BodyNode:
 		for _, child := range node.All() {
@@ -103,8 +160,32 @@ func (g *generator) walk(n parse.Node) error {
 		g.out.WriteString(fmt.Sprintf(`	// line %d, offset %d
 	fmt.Print(%s)
 `, node.Line, node.Offset, v))
+	case *parse.BlockNode:
+		g.Import("fmt")
+		g.blocks[node.Name] = func(g *generator, node *parse.BlockNode) renderer {
+			// TODO: Wow, I don't know about all this.
+			return func() {
+				g.out.WriteString(fmt.Sprintf(`func block_%s() {
+`, node.Name))
+				g.walk(node.Body)
+				g.out.WriteString(`}`)
+			}
+		}(g, node)
+		if !g.child {
+			g.out.WriteString(fmt.Sprintf(`	// line %d, offset %d
+	block_%s()
+`, node.Line, node.Offset, node.Name))
+		}
 	}
 	return nil
+}
+
+func (g *generator) evaluate(e parse.Expr) (string, bool) {
+	switch expr := e.(type) {
+	case *parse.StringExpr:
+		return expr.Text, true
+	}
+	return "", false
 }
 
 func (g *generator) walkExpr(e parse.Expr) (string, error) {
