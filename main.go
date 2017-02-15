@@ -17,8 +17,8 @@ var underscorize = regexp.MustCompile(`[^\w_]`)
 func main() {
 	loader := &stick.MemoryLoader{
 		Templates: map[string]string{
-			"test.twig": `{% extends 'someother.twig' %}{% block test %}World{% endblock %}`,
-			"someother.twig": `Hello, {% block test %}{% endblock %}!`,
+			"layout.twig": `Hello, {% block name %}{% endblock %}!`,
+			"test.twig": `{% extends 'layout.twig' %}{% block name %}World{% endblock %}`,
 		},
 	}
 
@@ -96,20 +96,22 @@ func newGenerator(loader stick.Loader) *generator {
 }
 
 func (g *generator) Output() string {
-	args := make([]string, 0)
+	args := make([]string, len(g.args))
 	for _, v := range g.args {
 		args = append(args, fmt.Sprintf("%s %s", v.Name, v.Typ))
 	}
-	imports := make([]string, 0)
+	imports := make([]string, len(g.imports))
 	for v, _ := range g.imports {
 		imports = append(imports, fmt.Sprintf(`"%s"`, v))
 	}
 	body := g.out.String()
-	g.out.Reset()
+	funcs := make([]string, len(g.blocks))
 	for _, block := range g.blocks {
+		g.out.Reset()
 		block()
+		funcs = append(funcs, g.out.String())
 	}
-	funcs := g.out.String()
+
 
 	return fmt.Sprintf(`
 package main
@@ -122,7 +124,7 @@ import (
 
 func template_%s(%s) {
 %s}
-`, strings.Join(imports, "\n	"), funcs, g.name, strings.Join(args, ", "), body)
+`, strings.Join(imports, "\n	"), strings.Join(funcs, "\n"), g.name, strings.Join(args, ", "), body)
 }
 
 func (g *generator) walk(n parse.Node) error {
@@ -148,8 +150,8 @@ func (g *generator) walk(n parse.Node) error {
 	case *parse.TextNode:
 		g.Import("fmt")
 		g.out.WriteString(fmt.Sprintf(`	// line %d, offset %d
-	fmt.Print("%s")
-`, node.Line, node.Offset, node.Data))
+	fmt.Print(%s)
+`, node.Line, node.Offset, fmt.Sprintf("`%s`", node.Data)))
 	case *parse.PrintNode:
 		v, err := g.walkExpr(node.X)
 		if err != nil {
