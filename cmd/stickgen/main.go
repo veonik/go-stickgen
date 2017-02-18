@@ -46,7 +46,6 @@ func main() {
 	if err != nil {
 		fmt.Printf("stickgen: output path is not a directory: %s\n", *out)
 	}
-	g := stickgen.NewGenerator(loader)
 	files, err := filepath.Glob(filepath.Join(*path, flag.Arg(0)))
 	if err != nil {
 		fmt.Printf("stickgen: unable to glob inputs: %s\n", err.Error())
@@ -60,8 +59,14 @@ func main() {
 			return
 		}
 		outfile := filepath.Join(*out, tpl) + ".go"
+		dirName := filepath.Dir(outfile)
+		err = os.MkdirAll(dirName, 0755)
+		if err != nil {
+			fmt.Printf("stickgen: output path is not a directory: %s\n", *out)
+		}
 		fmt.Printf("Generating %s as %s\n", file, outfile)
 		outfiles[i] = outfile
+		g := stickgen.NewGenerator(filepath.Base(dirName), loader)
 		output, err := g.Generate(tpl)
 		if err != nil {
 			fmt.Printf("stickgen: unable to generate code: %s\n", err)
