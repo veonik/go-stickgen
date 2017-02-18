@@ -1,16 +1,19 @@
-// Command stickgen generates Go code from a Stick/Twig template.
-//
-//	$ go get github.com/tyler-sommer/stickgen/cmd/stickgen
-//
-// Stickgen takes an input path where views are stored, an output path for
-// generated files, and a glob for matching templates.
-//
-//	Usage: stickgen [-path <templates>] [-out <generated>] <glob>
-//	  -out string
-//	    	Output path (default "./generated")
-//	  -path string
-//	    	Path to templates (default ".")
-//
+/*
+
+Command stickgen generates Go code from a Stick/Twig template.
+
+
+	$ go get github.com/tyler-sommer/stickgen/cmd/stickgen
+
+Stickgen takes an input path where views are stored, an output path for
+generated files, and a glob for matching templates.
+
+	Usage: stickgen [-path <templates>] [-out <generated>] <glob>
+	  -out string
+	    	Output path (default "./generated")
+	  -path string
+	    	Path to templates (default ".")
+*/
 package main
 
 import (
