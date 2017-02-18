@@ -11,7 +11,6 @@
 //	  -path string
 //	    	Path to templates (default ".")
 //
-
 package main
 
 import (
