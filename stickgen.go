@@ -61,11 +61,11 @@ func NewGenerator(pkgName string, loader stick.Loader) *Generator {
 			"github.com/tyler-sommer/stick": true,
 			"io": true,
 		},
-		blocks:  make(map[string]renderer),
-		args:    make(map[string]bool),
-		root:    true,
-		stack:   make([]string, 0),
-		tabs:    1,
+		blocks: make(map[string]renderer),
+		args:   make(map[string]bool),
+		root:   true,
+		stack:  make([]string, 0),
+		tabs:   1,
 	}
 
 	return g
@@ -127,7 +127,7 @@ import (
 
 %s
 
-func Template%s(output io.Writer, ctx map[string]stick.Value) {
+func Template%s(env *stick.Env, output io.Writer, ctx map[string]stick.Value) {
 %s}
 `, g.pkgName, strings.Join(imports, "\n	"), strings.Join(funcs, "\n"), titleize(g.name), body)
 }
@@ -168,7 +168,7 @@ func (g *Generator) walk(n parse.Node) error {
 			}
 		} else {
 			// TODO: Handle more than just string literals
-			return errors.New("Unable to evaluate extends reference")
+			return errors.New("Unable to evaluate include reference")
 		}
 	case *parse.TextNode:
 		g.addImport("fmt")
@@ -216,7 +216,7 @@ func (g *Generator) walk(n parse.Node) error {
 		g.blocks[node.Name] = func(g *Generator, node *parse.BlockNode, rootName string) renderer {
 			// TODO: Wow, I don't know about all this.
 			return func() {
-				g.out.WriteString(fmt.Sprintf(`func block%s%s(output io.Writer, ctx map[string]stick.Value) {
+				g.out.WriteString(fmt.Sprintf(`func block%s%s(env *stick.Env, output io.Writer, ctx map[string]stick.Value) {
 `, titleize(rootName), titleize(node.Name)))
 				g.walk(node.Body)
 				g.out.WriteString(`}`)
@@ -224,7 +224,7 @@ func (g *Generator) walk(n parse.Node) error {
 		}(g, node, g.stack[0])
 		if !g.root {
 			g.out.WriteString(fmt.Sprintf(`%s// line %d, offset %d in %s
-%sblock%s%s(output, ctx)
+%sblock%s%s(env, output, ctx)
 `, g.indent(), node.Line, node.Offset, g.name, g.indent(), titleize(g.stack[0]), titleize(node.Name)))
 		}
 	case *parse.ForNode:
@@ -280,7 +280,7 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 		return newNameExpr(expr.Text), nil
 	case *parse.GetAttrExpr:
 		if len(expr.Args) > 0 {
-			return emptyExpr, errors.New("Method calls are unsupported.")
+			return emptyExpr, errors.New("Method calls are currently unsupported.")
 		}
 		attr, err := g.walkExpr(expr.Attr)
 		if err != nil {
@@ -291,6 +291,30 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 			return emptyExpr, err
 		}
 		return evaluatedExpr{body: `val, err := stick.GetAttr(` + name.resultantName + `, "` + attr.resultantName + `")`, resultantName: "val", isFunction: true, hasError: true}, nil
+	case *parse.FuncExpr:
+		if len(expr.Args) != 1 {
+			return emptyExpr, errors.New("Function currently calls only support a single argument.")
+		}
+		arg, err := g.walkExpr(expr.Args[0])
+		if err != nil {
+			return emptyExpr, err
+		}
+		var argBody = ""
+		if arg.isFunction {
+			// TODO: Handle error
+			argBody = strings.Replace(arg.body, "err", "_", 1)
+		}
+		// TODO: nil stick.Context is passed into the function!
+		return evaluatedExpr{
+			body: fmt.Sprintf(`%s
+%s	var fnval stick.Value = ""
+%s	if fn, ok := env.Functions["%s"]; ok {
+%s		fnval = fn(nil, %s)
+%s	}`, argBody, g.indent(), g.indent(), expr.Name, g.indent(), arg.resultantName, g.indent()),
+			resultantName: "fnval",
+			isFunction:    true,
+			hasError:      false,
+		}, nil
 	}
 	return emptyExpr, nil
 }
