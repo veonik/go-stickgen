@@ -12,9 +12,20 @@ import (
 	"github.com/tyler-sommer/stick/parse"
 )
 
-var notWordOrUnderscore = regexp.MustCompile(`[^\w_]`)
+var notWord = regexp.MustCompile(`[^\w]|[_]`)
+
+func titleize(in string) string {
+	return strings.Replace(strings.Title(notWord.ReplaceAllString(in, " ")), " ", "", -1)
+}
 
 type renderer func()
+
+type evaluatedExpr struct {
+	body          string
+	isFunction    bool
+	hasError      bool
+	resultantName string
+}
 
 // A Generator handles generating Go code from Twig templates.
 type Generator struct {
@@ -26,6 +37,7 @@ type Generator struct {
 	args    map[string]bool
 	root    bool
 	stack   []string
+	tabs    int
 }
 
 // Generate parses the given template and outputs the generated code.
@@ -43,17 +55,19 @@ func NewGenerator(loader stick.Loader) *Generator {
 		loader:  loader,
 		name:    "",
 		out:     &bytes.Buffer{},
-		imports: map[string]bool{
-			"github.com/tyler-sommer/stick": true,
-			"fmt": true,
-		},
+		imports: map[string]bool{},
 		blocks:  make(map[string]renderer),
 		args:    make(map[string]bool),
 		root:    true,
 		stack:   make([]string, 0),
+		tabs:    1,
 	}
 
 	return g
+}
+
+func (g *Generator) indent() string {
+	return strings.Repeat("	", g.tabs)
 }
 
 func (g *Generator) generate(name string) error {
@@ -103,9 +117,9 @@ import (
 
 %s
 
-func template_%s(ctx map[string]stick.Value) {
+func template%s(ctx map[string]stick.Value) {
 %s}
-`, strings.Join(imports, "\n	"), strings.Join(funcs, "\n"), notWordOrUnderscore.ReplaceAllString(g.name, "_"), body)
+`, strings.Join(imports, "\n	"), strings.Join(funcs, "\n"), titleize(g.name), body)
 }
 
 func (g *Generator) addImport(name string) {
@@ -148,36 +162,62 @@ func (g *Generator) walk(n parse.Node) error {
 		}
 	case *parse.TextNode:
 		g.addImport("fmt")
-		g.out.WriteString(fmt.Sprintf(`	// line %d, offset %d in %s
-	fmt.Print(%s)
-`, node.Line, node.Offset, g.name, fmt.Sprintf("`%s`", node.Data)))
+		g.out.WriteString(fmt.Sprintf(`%s// line %d, offset %d in %s
+%sfmt.Print(%s)
+`, g.indent(), node.Line, node.Offset, g.name, g.indent(), fmt.Sprintf("`%s`", node.Data)))
 	case *parse.PrintNode:
 		v, err := g.walkExpr(node.X)
 		if err != nil {
 			return err
 		}
 		g.addImport("fmt")
-		g.out.WriteString(fmt.Sprintf(`	// line %d, offset %d in %s
-	fmt.Print(%s)
-`, node.Line, node.Offset, g.name, v))
+		g.out.WriteString(fmt.Sprintf(`%s// line %d, offset %d in %s
+`, g.indent(), node.Line, node.Offset, g.name))
+		if v.isFunction {
+			// TODO: The goggles, they do nothing!
+			g.out.WriteString(fmt.Sprintf(`%s{
+`, g.indent()))
+			g.tabs++
+			g.out.WriteString(fmt.Sprintf(`%s%s
+`, g.indent(), v.body))
+			if v.hasError {
+				g.out.WriteString(fmt.Sprintf(`%sif err == nil {
+`, g.indent()))
+				g.tabs++
+				g.out.WriteString(fmt.Sprintf(`%sfmt.Print(%s)
+`, g.indent(), v.resultantName))
+				g.tabs--
+				g.out.WriteString(fmt.Sprintf(`%s}
+`, g.indent()))
+			} else {
+				g.out.WriteString(fmt.Sprintf(`%sfmt.Print(%s)
+`, g.indent(), v.resultantName))
+			}
+			g.tabs--
+			g.out.WriteString(fmt.Sprintf(`%s}
+`, g.indent()))
+		} else {
+			g.out.WriteString(fmt.Sprintf(`%sfmt.Print(%s)
+`, g.indent(), v.resultantName))
+		}
+
 	case *parse.BlockNode:
 		g.addImport("fmt")
-		g.blocks[node.Name] = func(g *Generator, node *parse.BlockNode) renderer {
+		g.blocks[node.Name] = func(g *Generator, node *parse.BlockNode, rootName string) renderer {
 			// TODO: Wow, I don't know about all this.
 			return func() {
-				g.out.WriteString(fmt.Sprintf(`func block_%s(ctx map[string]stick.Value) {
-`, node.Name))
+				g.out.WriteString(fmt.Sprintf(`func block%s%s(ctx map[string]stick.Value) {
+`, titleize(rootName), titleize(node.Name)))
 				g.walk(node.Body)
 				g.out.WriteString(`}`)
 			}
-		}(g, node)
+		}(g, node, g.stack[0])
 		if !g.root {
-			g.out.WriteString(fmt.Sprintf(`	// line %d, offset %d in %s
-	block_%s(ctx)
-`, node.Line, node.Offset, g.name, node.Name))
+			g.out.WriteString(fmt.Sprintf(`%s// line %d, offset %d in %s
+%sblock%s%s(ctx)
+`, g.indent(), node.Line, node.Offset, g.name, g.indent(), titleize(g.stack[0]), titleize(node.Name)))
 		}
 	case *parse.ForNode:
-		g.addImport("fmt")
 		name, err := g.walkExpr(node.X)
 		if err != nil {
 			return err
@@ -189,13 +229,19 @@ func (g *Generator) walk(n parse.Node) error {
 		}
 		val := node.Val
 		g.args[val] = true
-		g.out.WriteString(fmt.Sprintf(`	for %s, %s := range %s {
-`, key, val, name))
+		g.addImport("github.com/tyler-sommer/stick")
+		g.out.WriteString(fmt.Sprintf(`%s// line %d, offset %d in %s
+%sstick.Iterate(%s, func(%s, %s stick.Value, loop stick.Loop) (brk bool, err error) {
+`, g.indent(), node.Line, node.Pos, g.name, g.indent(), name.resultantName, key, val))
+		g.tabs++
 		g.walk(node.Body)
 		delete(g.args, val)
 		delete(g.args, key)
-		g.out.WriteString(`	}
-`)
+		g.out.WriteString(fmt.Sprintf(`%sreturn true, nil
+`, g.indent()))
+		g.tabs--
+		g.out.WriteString(fmt.Sprintf(`%s})
+`, g.indent()))
 	}
 	return nil
 }
@@ -208,28 +254,35 @@ func (g *Generator) evaluate(e parse.Expr) (string, bool) {
 	return "", false
 }
 
-func (g *Generator) walkExpr(e parse.Expr) (string, error) {
+func newNameExpr(name string) evaluatedExpr {
+	return evaluatedExpr{body: name, resultantName: name, isFunction: false, hasError: false}
+}
+
+var emptyExpr = evaluatedExpr{body: "", resultantName: "", isFunction: false, hasError: false}
+
+func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 	switch expr := e.(type) {
 	case *parse.NameExpr:
 		if _, ok := g.args[expr.Name]; ok {
-			return expr.Name, nil
+			return newNameExpr(expr.Name), nil
 		}
-		return "ctx[\"" + expr.Name + "\"]", nil
+		return newNameExpr("ctx[\"" + expr.Name + "\"]"), nil
 	case *parse.StringExpr:
-		return expr.Text, nil
+		return newNameExpr(expr.Text), nil
 	case *parse.GetAttrExpr:
 		if len(expr.Args) > 0 {
-			return "", errors.New("Method calls are unsupported.")
+			return emptyExpr, errors.New("Method calls are unsupported.")
 		}
 		attr, err := g.walkExpr(expr.Attr)
 		if err != nil {
-			return "", err
+			return emptyExpr, err
 		}
 		name, err := g.walkExpr(expr.Cont)
 		if err != nil {
-			return "", err
+			return emptyExpr, err
 		}
-		return "stick.CoerceString(" + name + "." + attr + ")", nil
+		g.addImport("github.com/tyler-sommer/stick")
+		return evaluatedExpr{body: `val, err := stick.GetAttr(` + name.resultantName + `, "` + attr.resultantName + `")`, resultantName: "val", isFunction: true, hasError: true}, nil
 	}
-	return "", nil
+	return emptyExpr, nil
 }

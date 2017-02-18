@@ -12,13 +12,23 @@ Installation
 Install the stickgen library with:
 
 ```
-go get github.com/tyler-sommer/go-stickgen
+go get github.com/tyler-sommer/go-stickgen/...
 ```
 
 Usage
 -----
 
-Below is a simple example that uses stickgen.
+```
+Usage: stickgen [-path <templates>] [-out <generated>] <glob>
+  -out string
+    	Output path (default "./generated")
+  -path string
+    	Path to templates (default ".")
+```
+
+### Usage as a library
+
+Below is a simple example that uses the stickgen `Generator`.
 
 ```go
 package main
