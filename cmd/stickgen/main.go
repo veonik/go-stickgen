@@ -3,7 +3,7 @@
 Command stickgen generates Go code from a Stick/Twig template.
 
 
-	$ go get github.com/tyler-sommer/stickgen/cmd/stickgen
+	$ go get -u github.com/veonik/go-stickgen/...
 
 Stickgen takes an input path where views are stored, an output path for
 generated files, and a glob for matching templates.
@@ -23,8 +23,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/tyler-sommer/go-stickgen"
 	"github.com/tyler-sommer/stick"
+	"github.com/veonik/go-stickgen"
 )
 
 var path = flag.String("path", ".", "Path to templates")

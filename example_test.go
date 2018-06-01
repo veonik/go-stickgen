@@ -1,37 +1,4 @@
-# go-stickgen
-
-[![GoDoc](https://godoc.org/github.com/veonik/go-stickgen?status.svg)](https://godoc.org/github.com/veonik/go-stickgen)
-
-Generates Go code for stick templates.
-
-> This project is currently in a proof-of-concept state, and is under early development.
-
-Installation
-------------
-
-Install the stickgen library and command with:
-
-```
-go get -u github.com/veonik/go-stickgen/...
-```
-
-Usage
------
-
-```
-Usage: stickgen [-path <templates>] [-out <generated>] <glob>
-  -out string
-    	Output path (default "./generated")
-  -path string
-    	Path to templates (default ".")
-```
-
-### Usage as a library
-
-Below is a simple example that uses the stickgen `Generator`.
-
-```go
-package main
+package stickgen_test
 
 import (
 	"fmt"
@@ -40,7 +7,7 @@ import (
 	"github.com/veonik/go-stickgen"
 )
 
-func main() {
+func ExampleNewGenerator() {
 	loader := &stick.MemoryLoader{
 		Templates: map[string]string{
 			"layout.twig": `Hello, {% block name %}{% endblock %}!`,
@@ -82,5 +49,3 @@ func main() {
 	// 	fmt.Fprint(output, `!`)
 	// }
 }
-```
-

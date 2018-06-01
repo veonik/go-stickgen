@@ -1,4 +1,4 @@
-package stickgen
+package stickgen // import "github.com/veonik/go-stickgen"
 
 import (
 	"bytes"
