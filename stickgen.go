@@ -99,8 +99,7 @@ func (g *Generator) generate(name string) error {
 			g.root = len(g.stack) == 1
 		}()
 	}
-	g.walk(tree.Root())
-	return nil
+	return g.walk(tree.Root())
 }
 
 func (g *Generator) output() string {
@@ -276,13 +275,17 @@ func (g *Generator) walk(n parse.Node) error {
 		g.out.WriteString(fmt.Sprintf(`%sif %sstick.CoerceBool(%s) {
 `, g.indent(), errCheck, cond.resultantName))
 		g.tabs++
-		g.walk(node.Body)
+		if err := g.walk(node.Body); err != nil {
+			panic(err)
+		}
 		g.tabs--
 		if len(node.Else.All()) > 0 {
 			g.out.WriteString(fmt.Sprintf(`%s} else {
 `, g.indent()))
 			g.tabs++
-			g.walk(node.Else)
+			if err := g.walk(node.Else); err != nil {
+				panic(err)
+			}
 			g.tabs--
 		}
 		g.out.WriteString(fmt.Sprintf(`%s}
@@ -295,6 +298,8 @@ func (g *Generator) evaluate(e parse.Expr) (string, bool) {
 	switch expr := e.(type) {
 	case *parse.StringExpr:
 		return expr.Text, true
+	default:
+		panic(e)
 	}
 	return "", false
 }
@@ -314,6 +319,8 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 		return newNameExpr("ctx[\"" + expr.Name + "\"]"), nil
 	case *parse.StringExpr:
 		return newNameExpr(`"` + expr.Text + `"`), nil
+	case *parse.NumberExpr:
+		return newNameExpr(expr.Value), nil
 	case *parse.GetAttrExpr:
 		if len(expr.Args) > 0 {
 			return emptyExpr, errors.New("Method calls are currently unsupported.")
@@ -327,6 +334,52 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 			return emptyExpr, err
 		}
 		return evaluatedExpr{body: `val, err := stick.GetAttr(` + name.resultantName + `, ` + attr.resultantName + `)`, resultantName: "val", isFunction: true, hasError: true}, nil
+	case *parse.FilterExpr:
+		argN := len(expr.Args)
+		if argN < 1 {
+			return emptyExpr, nil
+		}
+		var args []evaluatedExpr
+		var argBody []byte
+		for _, arg := range expr.Args {
+			val, err := g.walkExpr(arg)
+			if err != nil {
+				return emptyExpr, err
+			}
+			args = append(args, val)
+			if val.isFunction {
+				// TODO: Handle error
+				argBody = append(argBody, strings.Replace(val.body, "err", "_", 1)+"\n"...)
+			}
+		}
+		switch argN {
+		case 1:
+			// TODO: nil stick.Context is passed into the function!
+			return evaluatedExpr{
+				body: fmt.Sprintf(`%s
+%s	var fnval stick.Value = ""
+%s	if fn, ok := env.Filters["%s"]; ok {
+%s		fnval = fn(nil, %s)
+%s	}`, string(argBody), g.indent(), g.indent(), expr.Name, g.indent(), args[0].resultantName, g.indent()),
+				resultantName: "fnval",
+				isFunction:    true,
+				hasError:      false,
+			}, nil
+		case 2:
+			// TODO: nil stick.Context is passed into the function!
+			return evaluatedExpr{
+				body: fmt.Sprintf(`%s
+%s	var fnval stick.Value = ""
+%s	if fn, ok := env.Filters["%s"]; ok {
+%s		fnval = fn(nil, %s, %s)
+%s	}`, string(argBody), g.indent(), g.indent(), expr.Name, g.indent(), args[0].resultantName, args[1].resultantName, g.indent()),
+				resultantName: "fnval",
+				isFunction:    true,
+				hasError:      false,
+			}, nil
+		default:
+			panic("wot")
+		}
 	case *parse.FuncExpr:
 		if len(expr.Args) != 1 {
 			return emptyExpr, errors.New("Function currently calls only support a single argument.")
@@ -351,30 +404,36 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 			isFunction:    true,
 			hasError:      false,
 		}, nil
+	case *parse.GroupExpr:
+		exp, err := g.walkExpr(expr.X)
+		if err != nil {
+			return emptyExpr, err
+		}
+		return exp, nil
 	case *parse.BinaryExpr:
+		var pre string = ""
+		left, err := g.walkExpr(expr.Left)
+		if err != nil {
+			return emptyExpr, err
+		}
+		right, err := g.walkExpr(expr.Right)
+		if err != nil {
+			return emptyExpr, err
+		}
+		if left.isFunction {
+			// TODO: Handle error
+			pre = pre + strings.Replace(left.body, "err", "_ ", 1)
+		}
+		if right.isFunction {
+			if pre != "" {
+				pre = pre + "\n" + g.indent()
+			}
+			// TODO: Handle error
+			pre = pre + strings.Replace(strings.Replace(left.body, "err", "_ ", 1), right.resultantName, "right", 1)
+			right.resultantName = "right"
+		}
 		switch expr.Op {
 		case parse.OpBinaryEqual:
-			var pre string = ""
-			left, err := g.walkExpr(expr.Left)
-			if err != nil {
-				return emptyExpr, err
-			}
-			right, err := g.walkExpr(expr.Right)
-			if err != nil {
-				return emptyExpr, err
-			}
-			if left.isFunction {
-				// TODO: Handle error
-				pre = pre + strings.Replace(left.body, "err", "_ ", 1)
-			}
-			if right.isFunction {
-				if pre != "" {
-					pre = pre + "\n" + g.indent()
-				}
-				// TODO: Handle error
-				pre = pre + strings.Replace(strings.Replace(left.body, "err", "_ ", 1), right.resultantName, "right", 1)
-				right.resultantName = "right"
-			}
 			res := evaluatedExpr{
 				body:          pre,
 				isFunction:    left.isFunction || right.isFunction,
@@ -382,10 +441,51 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 				resultantName: fmt.Sprintf(`stick.Equal(%s, %s)`, left.resultantName, right.resultantName),
 			}
 			return res, nil
-
+		case parse.OpBinaryNotEqual:
+			res := evaluatedExpr{
+				body:          pre,
+				isFunction:    left.isFunction || right.isFunction,
+				hasError:      false,
+				resultantName: fmt.Sprintf(`!stick.Equal(%s, %s)`, left.resultantName, right.resultantName),
+			}
+			return res, nil
+		case parse.OpBinaryGreaterThan:
+			res := evaluatedExpr{
+				body:          pre,
+				isFunction:    left.isFunction || right.isFunction,
+				hasError:      false,
+				resultantName: fmt.Sprintf(`stick.CoerceNumber(%s) > stick.CoerceNumber(%s)`, left.resultantName, right.resultantName),
+			}
+			return res, nil
+		case parse.OpBinaryLessThan:
+			res := evaluatedExpr{
+				body:          pre,
+				isFunction:    left.isFunction || right.isFunction,
+				hasError:      false,
+				resultantName: fmt.Sprintf(`stick.CoerceNumber(%s) < stick.CoerceNumber(%s)`, left.resultantName, right.resultantName),
+			}
+			return res, nil
+		case parse.OpBinaryGreaterEqual:
+			res := evaluatedExpr{
+				body:          pre,
+				isFunction:    left.isFunction || right.isFunction,
+				hasError:      false,
+				resultantName: fmt.Sprintf(`stick.CoerceNumber(%s) >= stick.CoerceNumber(%s)`, left.resultantName, right.resultantName),
+			}
+			return res, nil
+		case parse.OpBinaryLessEqual:
+			res := evaluatedExpr{
+				body:          pre,
+				isFunction:    left.isFunction || right.isFunction,
+				hasError:      false,
+				resultantName: fmt.Sprintf(`stick.CoerceNumber(%s) <= stick.CoerceNumber(%s)`, left.resultantName, right.resultantName),
+			}
+			return res, nil
 		default:
 			return emptyExpr, fmt.Errorf("stickgen: unsupported binary operator: %s", expr.Op)
 		}
+	default:
+		return emptyExpr, fmt.Errorf("stickgen: unsupported expr: %T", expr)
 	}
 	return emptyExpr, nil
 }
