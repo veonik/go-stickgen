@@ -304,7 +304,7 @@ func (g *Generator) evaluate(e parse.Expr) (string, bool) {
 	return "", false
 }
 
-func newNameExpr(name string) evaluatedExpr {
+func newLiteral(name string) evaluatedExpr {
 	return evaluatedExpr{body: name, resultantName: name, isFunction: false, hasError: false}
 }
 
@@ -314,13 +314,13 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 	switch expr := e.(type) {
 	case *parse.NameExpr:
 		if _, ok := g.args[expr.Name]; ok {
-			return newNameExpr(expr.Name), nil
+			return newLiteral(expr.Name), nil
 		}
-		return newNameExpr("ctx[\"" + expr.Name + "\"]"), nil
+		return newLiteral("ctx[\"" + expr.Name + "\"]"), nil
 	case *parse.StringExpr:
-		return newNameExpr(`"` + expr.Text + `"`), nil
+		return newLiteral(`"` + expr.Text + `"`), nil
 	case *parse.NumberExpr:
-		return newNameExpr(expr.Value), nil
+		return newLiteral(expr.Value), nil
 	case *parse.GetAttrExpr:
 		if len(expr.Args) > 0 {
 			return emptyExpr, errors.New("Method calls are currently unsupported.")
@@ -334,76 +334,12 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 			return emptyExpr, err
 		}
 		return evaluatedExpr{body: `val, err := stick.GetAttr(` + name.resultantName + `, ` + attr.resultantName + `)`, resultantName: "val", isFunction: true, hasError: true}, nil
+	case *parse.TestExpr:
+		return g.walkFuncExpr(expr.FuncExpr, "Tests")
 	case *parse.FilterExpr:
-		argN := len(expr.Args)
-		if argN < 1 {
-			return emptyExpr, nil
-		}
-		var args []evaluatedExpr
-		var argBody []byte
-		for _, arg := range expr.Args {
-			val, err := g.walkExpr(arg)
-			if err != nil {
-				return emptyExpr, err
-			}
-			args = append(args, val)
-			if val.isFunction {
-				// TODO: Handle error
-				argBody = append(argBody, strings.Replace(val.body, "err", "_", 1)+"\n"...)
-			}
-		}
-		switch argN {
-		case 1:
-			// TODO: nil stick.Context is passed into the function!
-			return evaluatedExpr{
-				body: fmt.Sprintf(`%s
-%s	var fnval stick.Value = ""
-%s	if fn, ok := env.Filters["%s"]; ok {
-%s		fnval = fn(nil, %s)
-%s	}`, string(argBody), g.indent(), g.indent(), expr.Name, g.indent(), args[0].resultantName, g.indent()),
-				resultantName: "fnval",
-				isFunction:    true,
-				hasError:      false,
-			}, nil
-		case 2:
-			// TODO: nil stick.Context is passed into the function!
-			return evaluatedExpr{
-				body: fmt.Sprintf(`%s
-%s	var fnval stick.Value = ""
-%s	if fn, ok := env.Filters["%s"]; ok {
-%s		fnval = fn(nil, %s, %s)
-%s	}`, string(argBody), g.indent(), g.indent(), expr.Name, g.indent(), args[0].resultantName, args[1].resultantName, g.indent()),
-				resultantName: "fnval",
-				isFunction:    true,
-				hasError:      false,
-			}, nil
-		default:
-			panic("wot")
-		}
+		return g.walkFuncExpr(expr.FuncExpr, "Filters")
 	case *parse.FuncExpr:
-		if len(expr.Args) != 1 {
-			return emptyExpr, errors.New("Function currently calls only support a single argument.")
-		}
-		arg, err := g.walkExpr(expr.Args[0])
-		if err != nil {
-			return emptyExpr, err
-		}
-		var argBody string = ""
-		if arg.isFunction {
-			// TODO: Handle error
-			argBody = strings.Replace(arg.body, "err", "_", 1)
-		}
-		// TODO: nil stick.Context is passed into the function!
-		return evaluatedExpr{
-			body: fmt.Sprintf(`%s
-%s	var fnval stick.Value = ""
-%s	if fn, ok := env.Functions["%s"]; ok {
-%s		fnval = fn(nil, %s)
-%s	}`, argBody, g.indent(), g.indent(), expr.Name, g.indent(), arg.resultantName, g.indent()),
-			resultantName: "fnval",
-			isFunction:    true,
-			hasError:      false,
-		}, nil
+		return g.walkFuncExpr(expr, "Functions")
 	case *parse.GroupExpr:
 		exp, err := g.walkExpr(expr.X)
 		if err != nil {
@@ -411,7 +347,7 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 		}
 		return exp, nil
 	case *parse.BinaryExpr:
-		var pre string = ""
+		pre := ""
 		left, err := g.walkExpr(expr.Left)
 		if err != nil {
 			return emptyExpr, err
@@ -432,60 +368,61 @@ func (g *Generator) walkExpr(e parse.Expr) (evaluatedExpr, error) {
 			pre = pre + strings.Replace(strings.Replace(left.body, "err", "_ ", 1), right.resultantName, "right", 1)
 			right.resultantName = "right"
 		}
+		res := evaluatedExpr{
+			body:          pre,
+			isFunction:    left.isFunction || right.isFunction,
+			hasError:      false,
+		}
 		switch expr.Op {
 		case parse.OpBinaryEqual:
-			res := evaluatedExpr{
-				body:          pre,
-				isFunction:    left.isFunction || right.isFunction,
-				hasError:      false,
-				resultantName: fmt.Sprintf(`stick.Equal(%s, %s)`, left.resultantName, right.resultantName),
-			}
-			return res, nil
+			res.resultantName = fmt.Sprintf(`stick.Equal(%s, %s)`, left.resultantName, right.resultantName)
 		case parse.OpBinaryNotEqual:
-			res := evaluatedExpr{
-				body:          pre,
-				isFunction:    left.isFunction || right.isFunction,
-				hasError:      false,
-				resultantName: fmt.Sprintf(`!stick.Equal(%s, %s)`, left.resultantName, right.resultantName),
-			}
-			return res, nil
+			res.resultantName = fmt.Sprintf(`!stick.Equal(%s, %s)`, left.resultantName, right.resultantName)
 		case parse.OpBinaryGreaterThan:
-			res := evaluatedExpr{
-				body:          pre,
-				isFunction:    left.isFunction || right.isFunction,
-				hasError:      false,
-				resultantName: fmt.Sprintf(`stick.CoerceNumber(%s) > stick.CoerceNumber(%s)`, left.resultantName, right.resultantName),
-			}
-			return res, nil
+			res.resultantName = fmt.Sprintf(`stick.CoerceNumber(%s) > stick.CoerceNumber(%s)`, left.resultantName, right.resultantName)
 		case parse.OpBinaryLessThan:
-			res := evaluatedExpr{
-				body:          pre,
-				isFunction:    left.isFunction || right.isFunction,
-				hasError:      false,
-				resultantName: fmt.Sprintf(`stick.CoerceNumber(%s) < stick.CoerceNumber(%s)`, left.resultantName, right.resultantName),
-			}
-			return res, nil
+			res.resultantName = fmt.Sprintf(`stick.CoerceNumber(%s) < stick.CoerceNumber(%s)`, left.resultantName, right.resultantName)
 		case parse.OpBinaryGreaterEqual:
-			res := evaluatedExpr{
-				body:          pre,
-				isFunction:    left.isFunction || right.isFunction,
-				hasError:      false,
-				resultantName: fmt.Sprintf(`stick.CoerceNumber(%s) >= stick.CoerceNumber(%s)`, left.resultantName, right.resultantName),
-			}
-			return res, nil
+			res.resultantName = fmt.Sprintf(`stick.CoerceNumber(%s) >= stick.CoerceNumber(%s)`, left.resultantName, right.resultantName)
 		case parse.OpBinaryLessEqual:
-			res := evaluatedExpr{
-				body:          pre,
-				isFunction:    left.isFunction || right.isFunction,
-				hasError:      false,
-				resultantName: fmt.Sprintf(`stick.CoerceNumber(%s) <= stick.CoerceNumber(%s)`, left.resultantName, right.resultantName),
-			}
-			return res, nil
+			res.resultantName = fmt.Sprintf(`stick.CoerceNumber(%s) <= stick.CoerceNumber(%s)`, left.resultantName, right.resultantName)
 		default:
 			return emptyExpr, fmt.Errorf("stickgen: unsupported binary operator: %s", expr.Op)
 		}
-	default:
-		return emptyExpr, fmt.Errorf("stickgen: unsupported expr: %T", expr)
+		return res, nil
 	}
-	return emptyExpr, nil
+	return emptyExpr, fmt.Errorf("stickgen: unsupported expr: %T", e)
+}
+
+func (g *Generator) walkFuncExpr(expr *parse.FuncExpr, mapName string) (evaluatedExpr, error) {
+	argN := len(expr.Args)
+	var args []evaluatedExpr
+	// slice of interface{} so that it can be passed into fmt.Sprintf()
+	var argNames []interface{}
+	var argBody []byte
+	for _, arg := range expr.Args {
+		val, err := g.walkExpr(arg)
+		if err != nil {
+			return emptyExpr, err
+		}
+		args = append(args, val)
+		argNames = append(argNames, val.resultantName)
+		if val.isFunction {
+			// TODO: Handle error
+			argBody = append(argBody, strings.Replace(val.body, "err", "_", 1)+"\n"...)
+		}
+	}
+	p := strings.TrimSuffix(strings.Repeat("%s, ", argN), ",")
+	pf := fmt.Sprintf(p, argNames...)
+	// TODO: nil stick.Context is passed into the function!
+	return evaluatedExpr{
+		body: fmt.Sprintf(`%s
+%s	var fnval stick.Value = ""
+%s	if fn, ok := env.%s["%s"]; ok {
+%s		fnval = fn(nil, %s)
+%s	}`, string(argBody), g.indent(), g.indent(), mapName, expr.Name, g.indent(), pf, g.indent()),
+		resultantName: "fnval",
+		isFunction:    true,
+		hasError:      false,
+	}, nil
 }
